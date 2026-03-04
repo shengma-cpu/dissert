@@ -16,6 +16,7 @@ from sklearn.preprocessing import LabelEncoder
 FEATURE_LOOKBACK = 10
 TRAIN_LOOKBACK_MONTHS = 3
 INITIAL_INVESTMENT = 100.0
+CASH_FILE = "../data/process/cash.csv"
 
 # 三种信号列：oc=开→收，cc=昨收→今收，co=昨收→今开
 # SIGNAL_COLS = ["oc", "cc", "co"]
@@ -23,20 +24,9 @@ SIGNAL_COLS = ["oc"]
 
 
 def build_feature_table(df: pd.DataFrame, signal_col: str = "oc") -> pd.DataFrame:
-    """根据指定的收益率列（oc / cc / co）构建特征表。
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        原始行情数据，必须包含日期列与 signal_col 列。
-    signal_col : str
-        用于计算收益率的列名，可选 'oc'、'cc'、'co'。
-    """
     df = df.copy()
     # 统一日期列
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"])
-    elif "Date" in df.columns:
+    if "Date" in df.columns:
         df["date"] = pd.to_datetime(df["Date"])
     else:
         raise ValueError("缺少日期列 Date/date")
@@ -47,7 +37,8 @@ def build_feature_table(df: pd.DataFrame, signal_col: str = "oc") -> pd.DataFram
     df["return_stock"] = df[signal_col].astype(float)
 
     # "+/-"标签与 FEATURE_LOOKBACK 日字符特征
-    labels = np.where(df["return_stock"] > 0, "+", "-")
+    label_up_down = np.where(df["return_stock"] > 0, "+", "-")
+    label_cash = np.where(df["return_stock"] == 0, "+", "-")
     feats = []
     targets = []
     for i in range(len(labels)):
@@ -63,8 +54,15 @@ def build_feature_table(df: pd.DataFrame, signal_col: str = "oc") -> pd.DataFram
     return df[["date", "feature_up_down", "target", "return_stock"]]
 
 
-def _backtest_single_signal(df: pd.DataFrame, signal_col: str) -> pd.DataFrame:
-    """对单一信号列（oc / cc / co）执行滚动回测，返回带 'signal' 标签的结果。"""
+def _backtest_single_signal(df: pd.DataFrame, cash_df: pd.DataFrame, signal_col: str) -> pd.DataFrame:
+    # 确保日期列格式为datetime
+    df['date'] = pd.to_datetime(df['date'])
+    cash_df['date'] = pd.to_datetime(cash_df['date'])
+
+    # 创建 return_label 列
+    df['return_label'] = df[signal_col].apply(lambda x: '+' if x > 0 else '-')
+    cash_df['return_label'] = cash_df['return'].apply(lambda x: '+' if x > 0 else '-')
+
     data = build_feature_table(df, signal_col=signal_col)
     if data.empty:
         return pd.DataFrame(columns=["date", "value", "predicted", "signal"])
@@ -159,10 +157,26 @@ def backtest_one_ticker(df: pd.DataFrame) -> pd.DataFrame:
     if not available:
         raise ValueError(f"数据中缺少所有信号列 {SIGNAL_COLS}，请检查输入")
 
+    # 生成现金基准文件：若已存在则先删除，再按 df 的日期列重建
+    cash_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), CASH_FILE)
+    if os.path.exists(cash_path):
+        os.remove(cash_path)
+    date_col = "date" if "date" in df.columns else "Date"
+    cash_df = pd.DataFrame({
+        "Date":   pd.to_datetime(df[date_col]).dt.strftime("%Y-%m-%d"),
+        "price":  1,
+        "return": 1e-6,
+    })
+    os.makedirs(os.path.dirname(cash_path), exist_ok=True)
+    cash_df.to_csv(cash_path, index=False)
+    print(f"cash file saved: {cash_path} ({len(cash_df)} rows)")
+
+    cash_df = pd.read_csv(cash_path)
+
     parts = []
     for sig in available:
         print(f"  回测信号: {sig}")
-        result = _backtest_single_signal(df, signal_col=sig)
+        result = _backtest_single_signal(df, cash_df, signal_col=sig)
         parts.append(result)
 
     return pd.concat(parts, ignore_index=True)
