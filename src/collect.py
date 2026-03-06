@@ -2,31 +2,31 @@ import yfinance as yf
 import os
 
 def collect_data():
-    # 1. 定义股票代码列表
+    # 1. Define the stock ticker list
     tickers = ['AAPL', 'TSLA', 'XOM', 'JPM']
 
-    # 2. 创建存储目录 (如果不存在)
+    # 2. Create the data storage directory (if it does not exist)
     output_dir = './../data'
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-        print(f"目录 '{output_dir}' 已创建。")
+        print(f"Directory '{output_dir}' has been created.")
 
-    # 3. 下载数据并保存
+    # 3. Download the data and save it
     for ticker in tickers:
-        print(f"正在获取 {ticker} 的数据 (2000年至今)...")
+        print(f"Fetching data for {ticker} (from 2000 to present)...")
         
-        # 获取数据
-        # start='2000-01-01' 指定起始日期
-        # yfinance 会自动处理 TSLA 这种在 2000 年后才上市的股票
+        # Get data
+        # start='2000-01-01' specifies the start date
+        # yfinance will automatically handle stocks like TSLA that went public after 2000
         data = yf.download(ticker, start='2000-01-01')
         
         if not data.empty:
-            # 4. 构造文件路径并保存为 CSV
+            # 4. Construct the file path and save as CSV
             file_path = os.path.join(output_dir, f"{ticker}.csv")
             data.to_csv(file_path)
-            print(f"成功保存: {file_path}")
+            print(f"Successfully saved: {file_path}")
         else:
-            print(f"未能获取 {ticker} 的数据，请检查网络或代码。")
-    print("\n所有任务已完成！")
+            print(f"Failed to fetch data for {ticker}, please check your network or code.")
+    print("\nAll tasks completed!")
 
 collect_data()

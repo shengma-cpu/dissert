@@ -76,30 +76,32 @@ def build_feature_table(df: pd.DataFrame, signal_col: str, use_volume: bool):
 # ==========================================
 # Module 2: Model Factory
 # ==========================================
-def build_model(model_type: str, input_shape: tuple):
+def build_model(model_type: str, input_shape: tuple, units: int = 50, dropout: float = 0.2, lr: float = 0.001):
     """
     Dynamically generate network structure based on configuration
     """
     if model_type == "lstm":
         # Traditional LSTM model
         model = Sequential()
-        model.add(LSTM(50, input_shape=input_shape))
+        model.add(LSTM(units, input_shape=input_shape))
+        model.add(Dropout(dropout))
         model.add(Dense(2, activation='softmax'))
     elif model_type == "gru":
         model = Sequential()
-        model.add(GRU(50, input_shape=input_shape))
+        model.add(GRU(units, input_shape=input_shape))
+        model.add(Dropout(dropout))
         model.add(Dense(2, activation='softmax'))
     elif model_type == "attention":
         # Improved BiGRU-Attention model
         inputs = Input(shape=input_shape)
-        gru_out = Bidirectional(GRU(50, return_sequences=True))(inputs)
-        gru_out = Dropout(0.2)(gru_out)
+        gru_out = Bidirectional(GRU(units, return_sequences=True))(inputs)
+        gru_out = Dropout(dropout)(gru_out)
 
         # Attention mechanism to calculate weights
         attention = Dense(1, activation='tanh')(gru_out) 
         attention = Flatten()(attention)
         attention = Dense(input_shape[0], activation='softmax')(attention)  # input_shape[0] is LOOKBACK
-        attention = RepeatVector(100)(attention)  # Dimension after BiGRU(50) concatenation is 100
+        attention = RepeatVector(units * 2)(attention)  # Dimension after BiGRU concatenation is units * 2
         attention = Permute([2, 1])(attention)
 
         # Weighted sum
@@ -112,7 +114,8 @@ def build_model(model_type: str, input_shape: tuple):
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
 
-    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    from tensorflow.keras.optimizers import Adam
+    model.compile(optimizer=Adam(learning_rate=lr), loss='categorical_crossentropy', metrics=['accuracy'])
     return model
 
 # ==========================================
@@ -162,11 +165,47 @@ def _backtest_single_experiment(df: pd.DataFrame, cash_df: pd.DataFrame,
             y_train_encoded = label_encoder.fit_transform(train_set['target'])
             y_train_categorical = to_categorical(y_train_encoded, num_classes=2)
 
-            # 2. Build and train model
+            # 2. Prepare for DBO optimization and construct model
             input_shape = (FEATURE_LOOKBACK, 2 if use_volume else 1)
-            model = build_model(model_type, input_shape)
             
-            # Use verbose=0 to keep printing clean, avoid excessive progress bar output
+            # Split validation set for DBO fitness evaluation
+            val_split = int(len(X_train) * 0.8)
+            X_dbo_train, X_dbo_val = X_train[:val_split], X_train[val_split:]
+            y_dbo_train, y_dbo_val = y_train_categorical[:val_split], y_train_categorical[val_split:]
+            
+            def dbo_obj(params):
+                u = int(np.round(params[0]))
+                d = float(params[1])
+                l = float(params[2])
+                try:
+                    m = build_model(model_type, input_shape, units=u, dropout=d, lr=l)
+                    m.fit(X_dbo_train, y_dbo_train, epochs=3, batch_size=32, verbose=0)
+                    loss, _ = m.evaluate(X_dbo_val, y_dbo_val, verbose=0)
+                    del m
+                    K.clear_session()
+                    return loss  # Minimize loss
+                except Exception as e:
+                    return 999.0
+            
+            # bounds: units=[10, 100], dropout=[0.1, 0.5], lr=[0.0001, 0.01]
+            lb = [10, 0.1, 0.0001]
+            ub = [100, 0.5, 0.01]
+            
+            import sys
+            import os
+            sys.path.append(os.path.dirname(__file__))
+            from dbo import DBO
+            
+            # Use small parameters to avoid running too long, you can adjust pop_size and max_iter for better parameters but more time
+            dbo = DBO(dbo_obj, lb, ub, dim=3, pop_size=3, max_iter=2)
+            best_params, best_loss = dbo.optimize()
+            
+            best_units = int(np.round(best_params[0]))
+            best_dropout = float(best_params[1])
+            best_lr = float(best_params[2])
+            
+            # Construct and train final model with best hyperparameters optimized by optimizer
+            model = build_model(model_type, input_shape, units=best_units, dropout=best_dropout, lr=best_lr)
             model.fit(X_train, y_train_categorical, epochs=10, batch_size=32, verbose=0)
 
             # 3. Perform prediction
@@ -192,8 +231,9 @@ def _backtest_single_experiment(df: pd.DataFrame, cash_df: pd.DataFrame,
             
             # Print debug information
             print(
-                  f"Net Value: {current_value:>8.2f} | acc: {total_correct/total_pred:.2%},  Prob: [cash:{y_pred[0][0]:.3f}, stock:{y_pred[0][1]:.5f}]"
-                  f"[Pred: {pred_label:<5} | Real: {real_label:<5} | "
+                  f"Net Value: {current_value:>8.2f} | acc: {total_correct/total_pred:.2%},  Prob: [cash:{y_pred[0][0]:.3f}, stock:{y_pred[0][1]:.5f}] "
+                  f"[Pred: {pred_label:<5} | Real: {real_label:<5}] "
+                  f"(DBO params: units={best_units}, drop={best_dropout:.2f}, lr={best_lr:.4f})"
                   )
             
             records.append([date, current_value, pred_label, real_label, y_pred[0].tolist()])

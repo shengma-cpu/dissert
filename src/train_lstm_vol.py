@@ -13,7 +13,7 @@ from tensorflow.keras.utils import to_categorical
 from keras import backend as K
 from sklearn.preprocessing import LabelEncoder
 
-# 保持整体思路：用过去10天的“+-”字符序列作为特征，滚动3个月训练，逐日预测并累乘收益
+# Keep the general idea: use the past 10 days of "+-" character sequences as features, roll 3 months for training, predict daily and accumulate returns
 FEATURE_LOOKBACK = 10
 TRAIN_LOOKBACK_MONTHS = 12
 INITIAL_INVESTMENT = 100.0
@@ -21,7 +21,7 @@ MODEL_TYPE = ["gru"]
 START_TIME = "2026-2-01"
 # START_TIME = "2024-05-01"
 
-# 三种信号列：oc=开→收，cc=昨收→今收，co=昨收→今开
+# Three signal columns: oc=open->close, cc=prev_close->close, co=prev_close->open
 # SIGNAL_COLS = ["oc", "cc", "co"]
 SIGNAL_COLS = ["oc"]
 
@@ -29,23 +29,23 @@ base = os.path.dirname(os.path.dirname(__file__))
 
 def build_feature_table(df: pd.DataFrame, signal_col: str = "oc"):
     """
-    不仅构建标签序列，还准备好数值特征。
+    Not only build label sequences, but also prepare numeric features.
     """
     if signal_col not in df.columns:
-        raise ValueError(f"缺少 {signal_col} 列")
+        raise ValueError(f"Missing {signal_col} column")
     
-    # 1. 预处理：将标签转换为 0/1 数值
+    # 1. Preprocessing: convert labels into 0/1 numeric values
     df['return_label_df'] = df[signal_col].apply(lambda x: 1 if x > 0 else 0)
     
-    # 2. 准备特征矩阵：[标签, 成交量百分比]
-    # 假设 df["v"] 已经是百分比（如 0.02 代表 2%）
+    # 2. Prepare feature matrix: [label, volume percentage]
+    # Assuming df["v"] is already a percentage (e.g., 0.02 means 2%)
     label_data = df['return_label_df'].values
     volume_data = df['v'].fillna(0).values 
 
     feats = []
     for i in range(len(df)):
         if i >= FEATURE_LOOKBACK:
-            # 提取过去 10 天的 [标签, 成交量] 组合
+            # Extract past 10 days of [label, volume] combination
             # shape: (10, 2)
             seq = np.column_stack((
                 label_data[i - FEATURE_LOOKBACK : i],
@@ -62,11 +62,11 @@ def _backtest_single_signal(df: pd.DataFrame, cash_df: pd.DataFrame, signal_col:
     df['date'] = pd.to_datetime(df['Date'])
     cash_df['date'] = pd.to_datetime(cash_df['Date'])
 
-    # 构建特征表（包含成交量）
+    # Build feature table (including volume)
     build_feature_table(df, signal_col=signal_col)
 
     combined_data = pd.merge(df, cash_df, on='date')
-    # 目标： stock (ixic > cash) or cash
+    # Target: stock (ixic > cash) or cash
     combined_data['target'] = combined_data.apply(lambda row: 'stock' if row[signal_col] > row['return'] else 'cash', axis=1)
     
     current_value = INITIAL_INVESTMENT
@@ -79,7 +79,7 @@ def _backtest_single_signal(df: pd.DataFrame, cash_df: pd.DataFrame, signal_col:
 
     while current_date <= end_date:
         print("================================================================================")
-        print(f"current_date==> {current_date} | 模型: {model_type}")
+        print(f"current_date==> {current_date} | Model: {model_type}")
         
         train_start = current_date - pd.DateOffset(months=TRAIN_LOOKBACK_MONTHS)
         train_end = current_date - pd.Timedelta(days=1)
@@ -88,8 +88,8 @@ def _backtest_single_signal(df: pd.DataFrame, cash_df: pd.DataFrame, signal_col:
         test_set = combined_data[combined_data["date"] == current_date].dropna(subset=['feature_matrix'])
 
         if not test_set.empty and len(train_set) > 10:
-            # --- 数据准备 ---
-            # 转换 list of arrays 为 3D numpy array: (样本数, 10, 2)
+            # --- Data preparation ---
+            # Convert list of arrays into 3D numpy array: (samples, 10, 2)
             X_train = np.stack(train_set['feature_matrix'].values).astype(np.float32)
             X_test = np.stack(test_set['feature_matrix'].values).astype(np.float32)
             
@@ -97,13 +97,13 @@ def _backtest_single_signal(df: pd.DataFrame, cash_df: pd.DataFrame, signal_col:
             y_train_encoded = label_encoder.fit_transform(train_set['target'])
             y_train_categorical = to_categorical(y_train_encoded, num_classes=2)
 
-            # --- 模型定义: BiGRU-Attention (双特征输入) ---
-            # 这里的输入维度变为 (10, 2)
+            # --- Model definition: BiGRU-Attention (dual feature input) ---
+            # Here input dimension becomes (10, 2)
             inputs = Input(shape=(FEATURE_LOOKBACK, 2))
             
             gru_out = Bidirectional(GRU(50, return_sequences=True))(inputs)
 
-            # Attention 模块
+            # Attention Module
             attention = Dense(1, activation='tanh')(gru_out) 
             attention = Flatten()(attention)
             attention = Dense(FEATURE_LOOKBACK, activation='softmax')(attention)
@@ -118,16 +118,16 @@ def _backtest_single_signal(df: pd.DataFrame, cash_df: pd.DataFrame, signal_col:
 
             model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
             
-            # 训练 (增加成交量后，模型能学到更多动能特征)
+            # Train (With volume added, model can learn more momentum features)
             model.fit(X_train, y_train_categorical, epochs=10, batch_size=32, verbose=0)
 
-            # 预测
+            # Predict
             y_pred = model.predict(X_test, verbose=0)
             print("y_pred:", y_pred)
             decision = np.argmax(y_pred, axis=1)[0]
             pred_label = label_encoder.inverse_transform([decision])[0]
             
-            # 净值更新
+            # Update net value
             date = test_set.iloc[0]['date']
             ixic_rate = test_set.iloc[0][signal_col]
             cash_rate = test_set.iloc[0]['return']
@@ -153,12 +153,12 @@ def _backtest_single_signal(df: pd.DataFrame, cash_df: pd.DataFrame, signal_col:
     return pd.DataFrame(records, columns=["date", "value", "predicted", "real", "signal", "y_pred"])
 
 def backtest_one_ticker(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
-    """对 oc / cc / co 三种信号分别回测，合并结果返回。"""
+    """Backtest separately for oc / cc / co signals and return combined results."""
     available = [col for col in SIGNAL_COLS if col in df.columns]
     if not available:
-        raise ValueError(f"数据中缺少所有信号列 {SIGNAL_COLS}，请检查输入")
+        raise ValueError(f"All signal columns missing {SIGNAL_COLS}, please check input")
 
-    # 生成现金基准
+    # Generate cash benchmark
     date_col = "date" if "date" in df.columns else "Date"
     cash_df = pd.DataFrame({
         "Date":   pd.to_datetime(df[date_col]).dt.strftime("%Y-%m-%d"),
@@ -171,7 +171,7 @@ def backtest_one_ticker(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
 
     for model_type in MODEL_TYPE:
         for sig in available:
-            print(f"  回测信号: {sig}")
+            print(f"  Backtesting Signal: {sig}")
             result = _backtest_single_signal(df, cash_df, signal_col=sig, model_type=model_type)
             
             out_path = os.path.join(out_dir, f"{ticker}_{sig}_{model_type}_vol_backtest.csv")
@@ -188,7 +188,7 @@ def main():
     for p in paths:
         df = pd.read_csv(p)
         ticker = os.path.splitext(os.path.basename(p))[0]
-        print(f"处理: {ticker}")
+        print(f"Processing: {ticker}")
         backtest_one_ticker(df, ticker)
 
 if __name__ == "__main__":
